@@ -427,7 +427,3 @@ MIT License - free to use and modify.
 
 ---
 
-
-<p align="center">
-  <img src="https://github.com/user-attachments/assets/1b402ac0-dae3-41ac-80e4-f370339db8d7" alt="Chatbot Screenshot" width="600"/>
-</p>
