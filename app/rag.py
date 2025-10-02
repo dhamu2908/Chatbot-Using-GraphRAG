@@ -6,6 +6,8 @@ import hashlib
 import re
 import numpy as np
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
+import threading
 
 class GraphRAGSystem:
     def __init__(self):
@@ -17,6 +19,11 @@ class GraphRAGSystem:
         self.model_name = os.getenv("MODEL_NAME", "gemma:1b")
         self.embedding_model = "nomic-embed-text"
         self._ensure_embedding_model()
+        
+        # Thread pool for parallel processing
+        self.executor = ThreadPoolExecutor(max_workers=3)
+        self.embedding_cache = {}  # Cache embeddings
+        self.cache_lock = threading.Lock()
     
     def _ensure_embedding_model(self):
         """Ensure embedding model is available"""
@@ -26,14 +33,56 @@ class GraphRAGSystem:
             print(f"Pulling embedding model...")
             os.system(f"ollama pull {self.embedding_model}")
     
+    def normalize_entity(self, entity: str) -> str:
+        """Normalize entity names for better matching"""
+        normalized = entity.lower().strip()
+        normalized = re.sub(r'\s+', ' ', normalized)
+        normalized = re.sub(r'[.]', '', normalized)
+        
+        prefixes = ['dr', 'mr', 'mrs', 'ms', 'prof', 'sir']
+        for prefix in prefixes:
+            if normalized.startswith(prefix + ' '):
+                normalized = normalized[len(prefix)+1:]
+        
+        return normalized.strip()
+    
+    def extract_entity_variations(self, entity: str) -> List[str]:
+        """Generate variations of an entity name"""
+        variations = set()
+        normalized = self.normalize_entity(entity)
+        variations.add(normalized)
+        
+        words = normalized.split()
+        if len(words) > 1:
+            no_initials = ' '.join([w for w in words if len(w) > 1])
+            if no_initials:
+                variations.add(no_initials)
+        
+        variations.add(normalized.replace(' ', ''))
+        return list(variations)
+    
     def get_embedding(self, text: str) -> List[float]:
-        """Generate semantic embedding"""
+        """Generate semantic embedding with caching"""
+        # Create cache key
+        cache_key = hashlib.md5(text[:500].encode()).hexdigest()
+        
+        # Check cache
+        with self.cache_lock:
+            if cache_key in self.embedding_cache:
+                return self.embedding_cache[cache_key]
+        
         try:
             response = ollama.embeddings(
                 model=self.embedding_model,
                 prompt=text.strip()[:1000]
             )
-            return response['embedding']
+            embedding = response['embedding']
+            
+            # Store in cache
+            with self.cache_lock:
+                self.embedding_cache[cache_key] = embedding
+            
+            return embedding
         except Exception as e:
             print(f"Embedding error: {e}")
             return None
@@ -46,93 +95,121 @@ class GraphRAGSystem:
         return float(np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2)))
     
     def understand_query(self, question: str) -> Dict:
-        """
-        Analyze query intent and expand it
-        Returns: {
-            'original': original question,
-            'intent': question type,
-            'expanded': rephrased versions,
-            'key_entities': important terms
-        }
-        """
-        prompt = f"""Analyze this question and help improve search:
-
-Question: "{question}"
-
-Provide:
-1. Question type (who/what/when/where/why/how/explanation)
-2. Key entities or concepts (names, places, terms)
-3. 2 alternative ways to phrase this question
-4. Search keywords (5-8 words)
-
-Format your response as:
-Type: [type]
-Entities: [comma-separated]
-Rephrase 1: [alternative question]
-Rephrase 2: [alternative question]
-Keywords: [comma-separated]"""
-
-        try:
-            response = ollama.generate(
-                model=self.model_name,
-                prompt=prompt,
-                options={'temperature': 0.3, 'num_predict': 150}
-            )
-            
-            if response and 'response' in response:
-                text = response['response']
-                
-                # Parse response
-                intent = 'unknown'
-                entities = []
-                rephrases = [question]
-                keywords = []
-                
-                for line in text.split('\n'):
-                    line = line.strip()
-                    if line.startswith('Type:'):
-                        intent = line.split(':', 1)[1].strip().lower()
-                    elif line.startswith('Entities:'):
-                        entities = [e.strip() for e in line.split(':', 1)[1].split(',')]
-                    elif line.startswith('Rephrase'):
-                        rephrase = line.split(':', 1)[1].strip()
-                        if rephrase:
-                            rephrases.append(rephrase)
-                    elif line.startswith('Keywords:'):
-                        keywords = [k.strip() for k in line.split(':', 1)[1].split(',')]
-                
-                return {
-                    'original': question,
-                    'intent': intent,
-                    'entities': entities[:5],
-                    'expanded': rephrases[:3],
-                    'keywords': keywords[:8]
-                }
-        except Exception as e:
-            print(f"Query understanding failed: {e}")
+        """Robust query understanding with regex-first approach"""
+        print(f"\n{'='*60}")
+        print(f"UNDERSTANDING QUERY: {question}")
+        print(f"{'='*60}")
         
-        # Fallback to simple extraction
-        return {
-            'original': question,
-            'intent': 'unknown',
-            'entities': self.extract_entities_simple(question),
-            'expanded': [question],
-            'keywords': self.extract_keywords(question)
+        # DETERMINISTIC ENTITY EXTRACTION (doesn't rely on LLM)
+        direct_entities = []
+        
+        # 1. Extract capitalized multi-word names (e.g., "Shubman Gill", "Yuzi Chahal")
+        full_names = re.findall(r'\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)+\b', question)
+        direct_entities.extend(full_names)
+        print(f"Full names found: {full_names}")
+        
+        # 2. Extract single capitalized words (e.g., "Shubman", "Gill", "Chahal")
+        single_caps = re.findall(r'\b[A-Z][a-z]{2,}\b', question)
+        direct_entities.extend(single_caps)
+        print(f"Single capitalized words: {single_caps}")
+        
+        # 3. Handle lowercase names (casual typing like "shubman gill")
+        words = question.lower().split()
+        for i in range(len(words)):
+            # Check for two consecutive words that could be a name
+            if i < len(words) - 1:
+                word1, word2 = words[i], words[i+1]
+                # Skip common words
+                if len(word1) > 2 and len(word2) > 2 and word1 not in {'the', 'and', 'about', 'what', 'who', 'how', 'when', 'where'}:
+                    potential_name = f"{word1.capitalize()} {word2.capitalize()}"
+                    direct_entities.append(potential_name)
+                    print(f"Potential name from lowercase: {potential_name}")
+            
+            # Also add individual words as potential entities
+            if len(words[i]) > 3 and words[i] not in {'the', 'and', 'about', 'what', 'who', 'how', 'when', 'where', 'this', 'that', 'with', 'from'}:
+                direct_entities.append(words[i].capitalize())
+        
+        # 4. Extract numbers (for queries about amounts, years, etc.)
+        numbers = re.findall(r'\d+', question)
+        direct_entities.extend(numbers)
+        
+        print(f"\nAll direct entities extracted: {direct_entities}")
+        
+        # Generate variations for all entities
+        entity_variations = []
+        for entity in direct_entities:
+            if entity and len(entity) > 1:
+                variations = self.extract_entity_variations(entity)
+                entity_variations.extend(variations)
+                
+                # For multi-word names, also add each word separately
+                if ' ' in entity:
+                    words = entity.split()
+                    for word in words:
+                        if len(word) > 2:
+                            entity_variations.extend(self.extract_entity_variations(word))
+        
+        # Remove duplicates
+        entity_variations = list(dict.fromkeys(entity_variations))
+        
+        # Extract keywords from question
+        keyword_variations = []
+        important_words = re.findall(r'\b[a-z]{3,}\b', question.lower())
+        stop_words = {
+            'the', 'and', 'about', 'what', 'who', 'how', 'when', 'where', 'why',
+            'tell', 'something', 'anything', 'this', 'that', 'with', 'from', 'have'
         }
+        for word in important_words:
+            if word not in stop_words:
+                keyword_variations.extend(self.extract_entity_variations(word))
+        
+        keyword_variations = list(dict.fromkeys(keyword_variations))
+        
+        # Detect question type
+        question_lower = question.lower()
+        if any(w in question_lower for w in ['who is', 'who was', 'who']):
+            intent = 'who'
+        elif any(w in question_lower for w in ['what is', 'what was', 'what happened', 'what']):
+            intent = 'what'
+        elif any(w in question_lower for w in ['how much', 'how many']):
+            intent = 'how_much'
+        elif any(w in question_lower for w in ['why', 'reason']):
+            intent = 'why'
+        elif any(w in question_lower for w in ['when', 'time', 'date']):
+            intent = 'when'
+        else:
+            intent = 'unknown'
+        
+        result = {
+            'original': question,
+            'intent': intent,
+            'entities': entity_variations[:25],
+            'expanded': [question],
+            'keywords': keyword_variations[:25]
+        }
+        
+        print(f"\n{'='*60}")
+        print(f"FINAL QUERY ANALYSIS:")
+        print(f"  Intent: {result['intent']}")
+        print(f"  Entities ({len(result['entities'])}): {result['entities'][:10]}")
+        print(f"  Keywords ({len(result['keywords'])}): {result['keywords'][:10]}")
+        print(f"{'='*60}\n")
+        
+        return result
     
     def extract_entities_simple(self, text: str) -> List[str]:
         """Simple entity extraction"""
         entities = []
-        # Proper nouns
         proper = re.findall(r'\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*\b', text)
-        entities.extend([p.lower() for p in proper])
-        # Acronyms
+        entities.extend([p for p in proper])
         acronyms = re.findall(r'\b[A-Z]{2,}\b', text)
-        entities.extend([a.lower() for a in acronyms])
+        entities.extend([a for a in acronyms])
+        initials = re.findall(r'\b[A-Z]\.(?:[A-Z]\.)*[A-Z][a-z]+', text)
+        entities.extend(initials)
         return list(set(entities))[:5]
     
-    def chunk_text(self, text: str) -> List[str]:
-        """Intelligent chunking"""
+    def chunk_text(self, text: str, max_chunk_size: int = 150) -> List[str]:
+        """Optimized intelligent chunking"""
         sentences = text.replace('!', '.').replace('?', '.').split('.')
         sentences = [s.strip() for s in sentences if s.strip()]
         
@@ -142,7 +219,7 @@ Keywords: [comma-separated]"""
         
         for sent in sentences:
             words = len(sent.split())
-            if word_count + words > 150 and current:
+            if word_count + words > max_chunk_size and current:
                 chunks.append('. '.join(current) + '.')
                 current = [current[-1]] if current else []
                 word_count = len(current[0].split()) if current else 0
@@ -155,26 +232,75 @@ Keywords: [comma-separated]"""
         return chunks if chunks else [text]
     
     def extract_keywords(self, text: str) -> List[str]:
-        """Extract keywords"""
+        """Enhanced keyword extraction with better name recognition"""
         keywords = set()
-        proper = re.findall(r'\b[A-Z][a-z]+\b', text)
-        keywords.update(p.lower() for p in proper if len(p) > 2)
-        acronyms = re.findall(r'\b[A-Z]{2,}\b', text)
-        keywords.update(a.lower() for a in acronyms)
         
+        # Extract full names (2-3 words starting with capitals)
+        full_names = re.findall(r'\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,2}\b', text)
+        for name in full_names:
+            # Add full name and variations
+            keywords.update(self.extract_entity_variations(name))
+            # Also add individual name parts
+            name_parts = name.split()
+            for part in name_parts:
+                if len(part) > 2:
+                    keywords.update(self.extract_entity_variations(part))
+        
+        # Extract names with initials (Yuzi Chahal, B.R.Ambedkar style)
+        initials_names = re.findall(r'\b[A-Z][a-z]+(?:\s+[A-Z]\.?)*(?:\s+[A-Z][a-z]+)+\b', text)
+        for name in initials_names:
+            keywords.update(self.extract_entity_variations(name))
+        
+        # Extract single capitalized words (last names, places)
+        single_caps = re.findall(r'\b[A-Z][a-z]{2,}\b', text)
+        for word in single_caps:
+            keywords.update(self.extract_entity_variations(word))
+        
+        # Extract acronyms
+        acronyms = re.findall(r'\b[A-Z]{2,}\b', text)
+        for a in acronyms:
+            keywords.update(self.extract_entity_variations(a))
+        
+        # Extract important words (non-stopwords, frequency-based)
         stop_words = {
             'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for',
             'of', 'with', 'by', 'from', 'is', 'was', 'are', 'were', 'be', 'been',
-            'what', 'who', 'when', 'where', 'why', 'how'
+            'what', 'who', 'when', 'where', 'why', 'how', 'this', 'that', 'these',
+            'those', 'have', 'has', 'had', 'will', 'would', 'could', 'should'
         }
+        
         words = re.findall(r'\b[a-z]{3,}\b', text.lower())
         word_freq = Counter(w for w in words if w not in stop_words)
-        keywords.update([w for w, c in word_freq.most_common(8)])
+        keywords.update([w for w, c in word_freq.most_common(10)])
         
-        return list(keywords)[:15]
+        # Also extract numbers and special terms (amounts, years, etc.)
+        numbers = re.findall(r'\b\d+(?:,\d+)*(?:\.\d+)?\b', text)
+        keywords.update(numbers[:5])  # Add important numbers
+        
+        return list(keywords)[:30]  # Increased from 20 to 30
+    
+    def process_chunk(self, chunk: str, chunk_id: str, doc_id: str):
+        """Process a single chunk (for parallel execution)"""
+        try:
+            embedding = self.get_embedding(chunk)
+            if not embedding:
+                return None
+            
+            keywords = self.extract_keywords(chunk)
+            
+            return {
+                'chunk_id': chunk_id,
+                'content': chunk,
+                'doc_id': doc_id,
+                'embedding': embedding,
+                'keywords': keywords
+            }
+        except Exception as e:
+            print(f"Error processing chunk {chunk_id}: {e}")
+            return None
     
     def store_document(self, title: str, content: str):
-        """Store document with embeddings"""
+        """Store document with parallel chunk processing"""
         if not hasattr(self.neo4j, 'driver') or not self.neo4j.driver:
             print("Neo4j not available")
             return
@@ -186,19 +312,35 @@ Keywords: [comma-separated]"""
         
         try:
             with self.neo4j.driver.session() as session:
+                # Create document node
                 session.run(
                     "MERGE (d:Document {id: $id, title: $title})",
                     id=doc_id, title=title
                 )
                 
+                # Process chunks in parallel
+                chunk_data_list = []
+                futures = []
+                
                 for i, chunk in enumerate(chunks):
                     chunk_id = f"{doc_id}_chunk_{i}"
-                    embedding = self.get_embedding(chunk)
-                    if not embedding:
-                        continue
-                    
-                    keywords = self.extract_keywords(chunk)
-                    
+                    future = self.executor.submit(
+                        self.process_chunk, 
+                        chunk, 
+                        chunk_id, 
+                        doc_id
+                    )
+                    futures.append(future)
+                
+                # Collect results
+                for future in futures:
+                    result = future.result()
+                    if result:
+                        chunk_data_list.append(result)
+                
+                # Batch insert chunks and relationships
+                for chunk_data in chunk_data_list:
+                    # Create chunk node
                     session.run(
                         """
                         MERGE (c:Chunk {
@@ -206,114 +348,186 @@ Keywords: [comma-separated]"""
                             embedding: $embedding
                         })
                         """,
-                        id=chunk_id, content=chunk, doc_id=doc_id, embedding=embedding
+                        id=chunk_data['chunk_id'],
+                        content=chunk_data['content'],
+                        doc_id=chunk_data['doc_id'],
+                        embedding=chunk_data['embedding']
                     )
                     
+                    # Create document-chunk relationship
                     session.run(
                         "MATCH (d:Document {id: $doc_id}), (c:Chunk {id: $chunk_id}) "
                         "MERGE (d)-[:CONTAINS]->(c)",
-                        doc_id=doc_id, chunk_id=chunk_id
+                        doc_id=chunk_data['doc_id'],
+                        chunk_id=chunk_data['chunk_id']
                     )
                     
-                    for kw in keywords:
+                    # Create keyword relationships in batch
+                    for kw in chunk_data['keywords']:
                         if kw and len(kw) > 1:
                             session.run("MERGE (k:Keyword {name: $keyword})", keyword=kw)
                             session.run(
                                 "MATCH (c:Chunk {id: $chunk_id}), (k:Keyword {name: $keyword}) "
                                 "MERGE (c)-[:HAS_KEYWORD]->(k)",
-                                chunk_id=chunk_id, keyword=kw
+                                chunk_id=chunk_data['chunk_id'],
+                                keyword=kw
                             )
                 
-                print(f"  Stored successfully")
+                print(f"  Stored successfully with {len(chunk_data_list)} chunks")
                 
         except Exception as e:
-            print(f"Error: {e}")
+            print(f"Error storing document: {e}")
     
     def retrieve_with_reranking(self, question: str, query_analysis: Dict, 
-                                initial_k: int = 15, final_k: int = 5) -> Tuple[List[str], List[Dict]]:
-        """
-        Two-stage retrieval with re-ranking
-        Stage 1: Get initial candidates (fast)
-        Stage 2: Re-rank using query understanding (accurate)
-        """
+                                initial_k: int = 20, final_k: int = 8) -> Tuple[List[str], List[Dict]]:
+        """Enhanced retrieval with aggressive keyword matching"""
         if not hasattr(self.neo4j, 'driver') or not self.neo4j.driver:
             return (["Database not available."], [])
         
-        print(f"\nQuery Analysis:")
+        print(f"\n{'='*60}")
+        print(f"QUERY ANALYSIS:")
+        print(f"  Question: {question}")
         print(f"  Intent: {query_analysis['intent']}")
-        print(f"  Entities: {query_analysis['entities']}")
-        print(f"  Keywords: {query_analysis['keywords']}")
+        print(f"  Entities: {query_analysis['entities'][:10]}")
+        print(f"  Keywords: {query_analysis['keywords'][:10]}")
+        print(f"{'='*60}")
         
-        # Generate embeddings for all query variations
-        query_embeddings = []
-        for q in query_analysis['expanded']:
-            emb = self.get_embedding(q)
-            if emb:
-                query_embeddings.append(emb)
-        
-        if not query_embeddings:
+        # Get query embedding
+        query_embedding = self.get_embedding(question)
+        if not query_embedding:
             return (["Failed to generate embeddings."], [])
         
         try:
             with self.neo4j.driver.session() as session:
-                # Stage 1: Get initial candidates with keyword filter
-                all_keywords = query_analysis['keywords'] + query_analysis['entities']
+                all_keywords = list(set(query_analysis['keywords'] + query_analysis['entities']))
                 
+                print(f"\nSearching with {len(all_keywords)} total keywords: {all_keywords[:15]}")
+                
+                # STRATEGY 1: Aggressive keyword matching (highest priority)
+                keyword_candidates = []
                 if all_keywords:
                     result = session.run(
                         """
                         MATCH (d:Document)-[:CONTAINS]->(c:Chunk)-[:HAS_KEYWORD]->(k:Keyword)
                         WHERE k.name IN $keywords
-                        WITH DISTINCT c, d
+                        WITH DISTINCT c, d, count(DISTINCT k) as keyword_count
                         RETURN c.id as chunk_id, c.content as content, c.embedding as embedding,
-                               d.title as doc_title, d.id as doc_id
+                               d.title as doc_title, d.id as doc_id, keyword_count
+                        ORDER BY keyword_count DESC
+                        LIMIT 50
                         """,
-                        keywords=all_keywords
+                        keywords=all_keywords[:30]
                     )
-                    candidates = list(result)
+                    keyword_candidates = list(result)
+                    print(f"KEYWORD SEARCH: Found {len(keyword_candidates)} chunks")
+                    for i, cand in enumerate(keyword_candidates[:3]):
+                        print(f"  {i+1}. {cand['doc_title'][:50]} - matches: {cand['keyword_count']}")
+                
+                # STRATEGY 2: Text content search (secondary)
+                # Get all chunks and search in their content directly
+                content_candidates = []
+                result = session.run(
+                    """
+                    MATCH (d:Document)-[:CONTAINS]->(c:Chunk)
+                    RETURN c.id as chunk_id, c.content as content, c.embedding as embedding,
+                           d.title as doc_title, d.id as doc_id
+                    """
+                )
+                all_chunks = list(result)
+                
+                # Filter by content matching
+                for chunk in all_chunks:
+                    content_lower = chunk['content'].lower()
+                    content_normalized = self.normalize_entity(chunk['content'])
                     
-                    if len(candidates) < 10:
-                        result = session.run(
-                            """
-                            MATCH (d:Document)-[:CONTAINS]->(c:Chunk)
-                            RETURN c.id as chunk_id, c.content as content, c.embedding as embedding,
-                                   d.title as doc_title, d.id as doc_id
-                            """
-                        )
-                        candidates = list(result)
-                else:
+                    # Check if any entity appears in content
+                    matches = 0
+                    for entity in query_analysis['entities'][:15]:
+                        if entity.lower() in content_lower or entity in content_normalized:
+                            matches += 1
+                    
+                    if matches > 0:
+                        content_candidates.append({
+                            'chunk_id': chunk['chunk_id'],
+                            'content': chunk['content'],
+                            'embedding': chunk['embedding'],
+                            'doc_title': chunk['doc_title'],
+                            'doc_id': chunk['doc_id'],
+                            'content_matches': matches,
+                            'keyword_count': 0
+                        })
+                
+                print(f"CONTENT SEARCH: Found {len(content_candidates)} chunks with matching text")
+                for i, cand in enumerate(sorted(content_candidates, key=lambda x: x['content_matches'], reverse=True)[:3]):
+                    print(f"  {i+1}. {cand['doc_title'][:50]} - text matches: {cand['content_matches']}")
+                
+                # STRATEGY 3: Combine all candidates
+                candidates_dict = {}
+                
+                # Add keyword candidates
+                for cand in keyword_candidates:
+                    candidates_dict[cand['chunk_id']] = {
+                        'chunk_id': cand['chunk_id'],
+                        'content': cand['content'],
+                        'embedding': cand['embedding'],
+                        'doc_title': cand['doc_title'],
+                        'doc_id': cand['doc_id'],
+                        'keyword_count': cand['keyword_count'],
+                        'content_matches': 0
+                    }
+                
+                # Add or merge content candidates
+                for cand in content_candidates:
+                    if cand['chunk_id'] in candidates_dict:
+                        candidates_dict[cand['chunk_id']]['content_matches'] = cand['content_matches']
+                    else:
+                        candidates_dict[cand['chunk_id']] = cand
+                
+                candidates = list(candidates_dict.values())
+                
+                # If still no candidates, get top chunks by any means
+                if len(candidates) < 5:
+                    print(f"WARNING: Only {len(candidates)} candidates, adding more...")
                     result = session.run(
                         """
                         MATCH (d:Document)-[:CONTAINS]->(c:Chunk)
                         RETURN c.id as chunk_id, c.content as content, c.embedding as embedding,
                                d.title as doc_title, d.id as doc_id
+                        LIMIT 100
                         """
                     )
-                    candidates = list(result)
+                    for record in result:
+                        if record['chunk_id'] not in candidates_dict:
+                            candidates.append({
+                                'chunk_id': record['chunk_id'],
+                                'content': record['content'],
+                                'embedding': record['embedding'],
+                                'doc_title': record['doc_title'],
+                                'doc_id': record['doc_id'],
+                                'keyword_count': 0,
+                                'content_matches': 0
+                            })
                 
-                print(f"\nStage 1: Found {len(candidates)} candidate chunks")
+                print(f"\nTOTAL CANDIDATES: {len(candidates)}")
                 
-                # Stage 2: Calculate similarity with all query variations
+                # Score all candidates
                 scored_chunks = []
                 for record in candidates:
                     chunk_embedding = record["embedding"]
                     if not chunk_embedding:
                         continue
                     
-                    # Calculate max similarity across all query variations
-                    similarities = [
-                        self.cosine_similarity(qe, chunk_embedding) 
-                        for qe in query_embeddings
-                    ]
-                    max_similarity = max(similarities)
-                    avg_similarity = np.mean(similarities)
+                    # Semantic similarity
+                    similarity = self.cosine_similarity(query_embedding, chunk_embedding)
                     
-                    # Boost score if entities match
-                    content_lower = record["content"].lower()
-                    entity_boost = sum(1 for e in query_analysis['entities'] 
-                                     if e.lower() in content_lower) * 0.1
+                    # Keyword match boost (graph-based)
+                    keyword_boost = min(record.get('keyword_count', 0) * 0.15, 0.4)
                     
-                    final_score = max_similarity + entity_boost
+                    # Content match boost (text-based)
+                    content_boost = min(record.get('content_matches', 0) * 0.2, 0.5)
+                    
+                    # Combined score - prioritize content matches
+                    final_score = similarity + keyword_boost + content_boost
                     
                     scored_chunks.append({
                         "chunk_id": record["chunk_id"],
@@ -321,29 +535,32 @@ Keywords: [comma-separated]"""
                         "doc_title": record["doc_title"],
                         "doc_id": record["doc_id"],
                         "score": final_score,
-                        "max_sim": max_similarity,
-                        "avg_sim": avg_similarity
+                        "similarity": similarity,
+                        "keyword_count": record.get('keyword_count', 0),
+                        "content_matches": record.get('content_matches', 0)
                     })
                 
-                # Sort by final score
+                # Sort by score
                 scored_chunks.sort(key=lambda x: x["score"], reverse=True)
                 top_results = scored_chunks[:final_k]
                 
-                print(f"\nStage 2: Top {len(top_results)} after re-ranking:")
+                print(f"\n{'='*60}")
+                print(f"TOP {len(top_results)} RESULTS:")
                 for i, chunk in enumerate(top_results, 1):
-                    print(f"  {i}. {chunk['doc_title'][:40]} (score: {chunk['score']:.3f})")
+                    print(f"{i}. {chunk['doc_title'][:40]}")
+                    print(f"   Score: {chunk['score']:.3f} (sim: {chunk['similarity']:.3f}, kw: {chunk['keyword_count']}, txt: {chunk['content_matches']})")
+                    print(f"   Preview: {chunk['content'][:100]}...")
+                print(f"{'='*60}")
                 
                 if not top_results:
                     return (["No relevant documents found."], [])
                 
-                # Format results with contribution tracking
                 context_chunks = []
-                doc_contributions = {}  # Track how much each document contributed
+                doc_contributions = {}
                 
                 for chunk in top_results:
                     context_chunks.append(chunk["content"])
                     
-                    # Track contribution: score + content length
                     doc_id = chunk["doc_id"]
                     doc_title = chunk["doc_title"]
                     chunk_contribution = chunk["score"] * len(chunk["content"])
@@ -354,7 +571,6 @@ Keywords: [comma-separated]"""
                             "doc_id": doc_id,
                             "contribution": 0,
                             "chunk_count": 0,
-                            "avg_score": 0,
                             "scores": []
                         }
                     
@@ -362,22 +578,17 @@ Keywords: [comma-separated]"""
                     doc_contributions[doc_id]["chunk_count"] += 1
                     doc_contributions[doc_id]["scores"].append(chunk["score"])
                 
-                # Calculate average scores and sort by contribution
-                for doc_id in doc_contributions:
-                    scores = doc_contributions[doc_id]["scores"]
-                    doc_contributions[doc_id]["avg_score"] = np.mean(scores)
-                
-                # Sort sources by contribution (highest first)
                 sorted_sources = sorted(
                     doc_contributions.values(),
                     key=lambda x: x["contribution"],
                     reverse=True
-                )
+                )[:5]
                 
-                print(f"\nSource Contributions:")
+                print(f"\nSOURCE DOCUMENTS (by contribution):")
                 for i, source in enumerate(sorted_sources, 1):
-                    print(f"  {i}. {source['title'][:40]}")
-                    print(f"     Chunks used: {source['chunk_count']}, Avg score: {source['avg_score']:.3f}")
+                    avg_score = np.mean(source['scores'])
+                    print(f"  {i}. {source['title']}")
+                    print(f"     Chunks: {source['chunk_count']}, Avg score: {avg_score:.3f}")
                 
                 sources = [
                     {"title": s["title"], "doc_id": s["doc_id"]}
@@ -392,98 +603,94 @@ Keywords: [comma-separated]"""
             traceback.print_exc()
             return (["Error retrieving context."], [])
     
-    def validate_answer(self, question: str, answer: str, context: List[str]) -> Dict:
-        """
-        Validate if answer actually addresses the question
-        """
-        validation_prompt = f"""Evaluate this answer:
-
-Question: {question}
-Answer: {answer}
-
-Is this answer:
-1. Relevant to the question? (yes/no)
-2. Based on the provided context? (yes/no)
-3. Complete? (yes/no)
-
-Respond with only:
-Relevant: [yes/no]
-Grounded: [yes/no]
-Complete: [yes/no]
-Confidence: [low/medium/high]"""
-
-        try:
-            response = ollama.generate(
-                model=self.model_name,
-                prompt=validation_prompt,
-                options={'temperature': 0.1, 'num_predict': 50}
-            )
-            
-            if response and 'response' in response:
-                text = response['response'].lower()
-                return {
-                    'relevant': 'relevant: yes' in text,
-                    'grounded': 'grounded: yes' in text,
-                    'complete': 'complete: yes' in text,
-                    'confidence': 'high' if 'confidence: high' in text else 'medium'
-                }
-        except:
-            pass
-        
-        return {'relevant': True, 'grounded': True, 'complete': True, 'confidence': 'medium'}
-    
     def generate_answer(self, question: str, context: List[str], query_analysis: Dict) -> str:
-        """Generate answer with improved prompting"""
+        """Generate answer with improved context utilization"""
         if not context or "No relevant" in context[0]:
             return "I couldn't find relevant information in the uploaded documents to answer this question."
         
+        # Combine all context
         context_text = "\n\n".join(context[:5])
-        
-        # Customize prompt based on query intent
         intent = query_analysis.get('intent', 'unknown')
         
-        if 'who' in intent:
-            focus = "Focus on identifying the person and their key attributes."
-        elif 'what' in intent:
-            focus = "Provide a clear definition or explanation."
-        elif 'why' in intent:
-            focus = "Explain the reasons and causes."
-        elif 'how' in intent:
-            focus = "Describe the process or method."
-        else:
-            focus = "Provide a comprehensive answer."
+        # Extract key entities from question for focus
+        question_entities = query_analysis.get('entities', [])
+        entity_focus = ""
+        if question_entities:
+            entity_focus = f"Pay special attention to information about: {', '.join(question_entities[:3])}"
         
-        prompt = f"""You are a helpful assistant. Answer the question using ONLY the provided context.
+        if 'who' in intent:
+            focus = "Identify the person and provide specific details about them from the context."
+        elif 'what' in intent:
+            focus = "Provide specific information and details from the context."
+        elif 'why' in intent:
+            focus = "Explain the reasons using specific details from the context."
+        elif 'how' in intent or 'much' in question.lower():
+            focus = "Provide specific numbers, amounts, or details from the context."
+        else:
+            focus = "Provide specific information from the context."
+        
+        # More directive prompt that forces LLM to read context carefully
+        prompt = f"""Based on the following context, answer the question with specific details.
 
-Context:
+CONTEXT:
 {context_text}
 
-Question: {question}
+QUESTION: {question}
 
-Instructions:
-- {focus}
-- Answer based strictly on the context
-- Be direct and concise
-- If information is incomplete, acknowledge it
-- Cite specific details from the context
+INSTRUCTIONS:
+1. {focus}
+2. {entity_focus}
+3. Quote or reference specific facts, numbers, or details from the context
+4. If the exact answer isn't in the context, provide the closest relevant information
+5. Do NOT say "the context does not provide" if there is ANY related information
+6. Extract and present ANY relevant details you find
 
-Answer:"""
+ANSWER (be specific and use details from context):"""
         
         try:
             response = ollama.generate(
                 model=self.model_name,
                 prompt=prompt,
-                options={'temperature': 0.1, 'num_predict': 250, 'top_p': 0.9}
+                options={
+                    'temperature': 0.1,
+                    'num_predict': 250,
+                    'top_p': 0.9,
+                    'repeat_penalty': 1.1
+                }
             )
             
             if response and 'response' in response:
                 answer = response['response'].strip()
                 
-                # Validate answer
-                validation = self.validate_answer(question, answer, context)
+                # Check if answer is a refusal when context actually has info
+                refusal_phrases = [
+                    "does not contain",
+                    "does not provide",
+                    "no information about",
+                    "doesn't mention"
+                ]
                 
-                if not validation['relevant']:
-                    return "I found some information but it doesn't directly answer your question. Could you rephrase?"
+                is_refusal = any(phrase in answer.lower() for phrase in refusal_phrases)
+                
+                if is_refusal and len(context_text) > 100:
+                    # Force extraction of relevant information
+                    extraction_prompt = f"""The context below contains information. Extract and summarize ANY relevant details related to: {question}
+
+CONTEXT:
+{context_text}
+
+Extract specific facts, names, numbers, or details that relate to the question. Focus on what IS mentioned rather than what isn't:"""
+                    
+                    retry_response = ollama.generate(
+                        model=self.model_name,
+                        prompt=extraction_prompt,
+                        options={'temperature': 0.2, 'num_predict': 200}
+                    )
+                    
+                    if retry_response and 'response' in retry_response:
+                        extracted = retry_response['response'].strip()
+                        if extracted and len(extracted) > 20:
+                            return extracted
                 
                 return answer
             
@@ -493,14 +700,9 @@ Answer:"""
             return f"Error: {str(e)}"
     
     def chat(self, question: str) -> Dict:
-        """Main chat with advanced understanding"""
-        # Step 1: Understand the query
+        """Main chat with optimized processing"""
         query_analysis = self.understand_query(question)
-        
-        # Step 2: Retrieve with re-ranking
         context, sources = self.retrieve_with_reranking(question, query_analysis)
-        
-        # Step 3: Generate answer
         answer = self.generate_answer(question, context, query_analysis)
         
         return {

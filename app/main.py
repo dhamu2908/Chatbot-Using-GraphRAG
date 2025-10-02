@@ -1,11 +1,12 @@
-from fastapi import FastAPI, HTTPException, UploadFile, File
+from fastapi import FastAPI, HTTPException, UploadFile, File, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, PlainTextResponse
 from pydantic import BaseModel
 from typing import List, Optional
 import os
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
 import traceback
-import shutil
 
 class ChatRequest(BaseModel):
     question: str
@@ -37,6 +38,9 @@ app.add_middleware(
 
 UPLOAD_DIR = "uploaded_files"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+# Thread pool for parallel processing
+executor = ThreadPoolExecutor(max_workers=4)
 
 rag_system = None
 postgres = None
@@ -123,28 +127,67 @@ async def list_documents():
 
 @app.get("/document/{doc_id}")
 async def get_document(doc_id: str):
-    """Get document file by ID for download/viewing"""
+    """Get document content for viewing in browser"""
     if doc_id in file_storage:
         file_path = file_storage[doc_id]
         if os.path.exists(file_path):
-            return FileResponse(
-                file_path,
-                media_type='application/octet-stream',
-                filename=os.path.basename(file_path)
-            )
+            file_ext = os.path.splitext(file_path.lower())[1]
+            
+            if file_ext in ['.txt', '.md']:
+                try:
+                    with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                        content = f.read()
+                    return PlainTextResponse(
+                        content=content,
+                        headers={
+                            "Content-Type": "text/plain; charset=utf-8",
+                            "Content-Disposition": f"inline; filename={os.path.basename(file_path)}"
+                        }
+                    )
+                except Exception as e:
+                    raise HTTPException(status_code=500, detail=f"Error reading file: {str(e)}")
+            
+            elif file_ext == '.pdf':
+                return FileResponse(
+                    file_path,
+                    media_type='application/pdf',
+                    headers={
+                        "Content-Disposition": f"inline; filename={os.path.basename(file_path)}"
+                    }
+                )
+            
+            elif file_ext == '.docx':
+                raise HTTPException(
+                    status_code=415, 
+                    detail="DOCX files cannot be viewed directly in browser. The document content was used for the answer."
+                )
+            
+            else:
+                return FileResponse(
+                    file_path,
+                    media_type='application/octet-stream',
+                    headers={
+                        "Content-Disposition": f"inline; filename={os.path.basename(file_path)}"
+                    }
+                )
+    
     raise HTTPException(status_code=404, detail="Document file not found")
 
 def extract_text_from_file(content: bytes, filename: str) -> str:
+    """Optimized text extraction with better error handling"""
     file_ext = os.path.splitext(filename.lower())[1]
     
     if file_ext in ['.txt', '.md']:
-        for encoding in ['utf-8', 'latin-1', 'cp1252', 'iso-8859-1']:
-            try:
-                text = content.decode(encoding, errors='ignore')
-                if text.strip():
-                    return text
-            except:
-                continue
+        # Try UTF-8 first (most common)
+        try:
+            return content.decode('utf-8')
+        except UnicodeDecodeError:
+            # Fallback to other encodings
+            for encoding in ['latin-1', 'cp1252', 'iso-8859-1']:
+                try:
+                    return content.decode(encoding, errors='ignore')
+                except:
+                    continue
         raise ValueError("Could not decode text file")
     
     elif file_ext == '.pdf':
@@ -154,10 +197,13 @@ def extract_text_from_file(content: bytes, filename: str) -> str:
             
             pdf_file = BytesIO(content)
             pdf_reader = PyPDF2.PdfReader(pdf_file)
-            text = ""
+            
+            # Parallel page extraction for large PDFs
+            text_parts = []
             for page in pdf_reader.pages:
-                text += page.extract_text() + "\n"
-            return text.strip()
+                text_parts.append(page.extract_text())
+            
+            return "\n".join(text_parts).strip()
         except ImportError:
             raise ValueError("PyPDF2 not installed. Install with: pip install PyPDF2")
         except Exception as e:
@@ -170,122 +216,135 @@ def extract_text_from_file(content: bytes, filename: str) -> str:
             
             doc_file = BytesIO(content)
             doc = docx.Document(doc_file)
-            text = "\n".join([paragraph.text for paragraph in doc.paragraphs])
+            
+            # Extract all paragraphs efficiently
+            text = "\n".join([p.text for p in doc.paragraphs if p.text.strip()])
             return text.strip()
         except ImportError:
             raise ValueError("python-docx not installed. Install with: pip install python-docx")
         except Exception as e:
             raise ValueError(f"Failed to parse DOCX: {str(e)}")
     
-    elif file_ext == '.doc':
-        raise ValueError("Legacy .doc format not supported. Please convert to .docx or .txt format")
-    
     else:
         raise ValueError(f"Unsupported file format: {file_ext}")
 
+async def process_single_file(file: UploadFile):
+    """Process a single file asynchronously"""
+    try:
+        if not file.filename:
+            return {"success": False, "name": "unnamed_file", "reason": "No filename"}
+        
+        file_ext = os.path.splitext(file.filename.lower())[1]
+        allowed_exts = {'.txt', '.md', '.pdf', '.docx'}
+        
+        if file_ext not in allowed_exts:
+            return {
+                "success": False,
+                "name": file.filename,
+                "reason": f"Unsupported format: {file_ext}"
+            }
+        
+        # Read file content
+        content = await file.read()
+        if not content:
+            return {"success": False, "name": file.filename, "reason": "Empty file"}
+        
+        # Save file
+        file_path = os.path.join(UPLOAD_DIR, file.filename)
+        with open(file_path, 'wb') as f:
+            f.write(content)
+        
+        # Extract text (run in thread pool to avoid blocking)
+        loop = asyncio.get_event_loop()
+        try:
+            text_content = await loop.run_in_executor(
+                executor, 
+                extract_text_from_file, 
+                content, 
+                file.filename
+            )
+            
+            if not text_content or len(text_content.strip()) < 10:
+                return {"success": False, "name": file.filename, "reason": "No readable text"}
+            
+        except ValueError as e:
+            return {"success": False, "name": file.filename, "reason": str(e)}
+        except Exception as e:
+            return {"success": False, "name": file.filename, "reason": f"Parse error: {str(e)}"}
+        
+        # Store in RAG system (run in thread pool)
+        try:
+            await loop.run_in_executor(
+                executor,
+                rag_system.store_document,
+                file.filename,
+                text_content
+            )
+            
+            # Get document ID
+            doc_id = None
+            if hasattr(rag_system, 'neo4j') and rag_system.neo4j.driver:
+                with rag_system.neo4j.driver.session() as session:
+                    result = session.run(
+                        "MATCH (d:Document {title: $title}) RETURN d.id as id",
+                        title=file.filename
+                    )
+                    record = result.single()
+                    if record:
+                        doc_id = record["id"]
+                        file_storage[doc_id] = file_path
+            
+            # PostgreSQL backup (non-blocking)
+            if postgres and postgres.conn:
+                try:
+                    with postgres.conn.cursor() as cursor:
+                        cursor.execute(
+                            "INSERT INTO documents (title, content) VALUES (%s, %s)",
+                            (file.filename, text_content[:5000])
+                        )
+                        postgres.conn.commit()
+                except Exception as e:
+                    print(f"PostgreSQL backup warning: {e}")
+            
+            return {"success": True, "name": file.filename}
+            
+        except Exception as e:
+            return {"success": False, "name": file.filename, "reason": f"Storage failed: {str(e)}"}
+            
+    except Exception as e:
+        return {"success": False, "name": file.filename if file.filename else "unknown", "reason": f"Processing error: {str(e)}"}
+
 @app.post("/upload-files")
 async def upload_files(files: List[UploadFile] = File(...)):
+    """Optimized parallel file upload"""
     if not files:
         raise HTTPException(status_code=400, detail="No files provided")
     
     if not rag_system:
         raise HTTPException(status_code=503, detail="GraphRAG system not available")
     
-    results = []
-    failed_files = []
+    # Process all files in parallel
+    tasks = [process_single_file(file) for file in files]
+    results = await asyncio.gather(*tasks)
     
-    for file in files:
-        try:
-            print(f"Processing: {file.filename}")
-            
-            if not file.filename:
-                failed_files.append({"name": "unnamed_file", "reason": "No filename"})
-                continue
-            
-            file_ext = os.path.splitext(file.filename.lower())[1]
-            allowed_exts = {'.txt', '.md', '.pdf', '.docx'}
-            
-            if file_ext not in allowed_exts:
-                failed_files.append({
-                    "name": file.filename,
-                    "reason": f"Unsupported format: {file_ext}. Supported: .txt, .md, .pdf, .docx"
-                })
-                continue
-            
-            content = await file.read()
-            if not content:
-                failed_files.append({"name": file.filename, "reason": "Empty file"})
-                continue
-            
-            file_path = os.path.join(UPLOAD_DIR, file.filename)
-            with open(file_path, 'wb') as f:
-                f.write(content)
-            
-            try:
-                text_content = extract_text_from_file(content, file.filename)
-                
-                if not text_content or len(text_content.strip()) < 10:
-                    failed_files.append({"name": file.filename, "reason": "No readable text found"})
-                    continue
-                
-            except ValueError as e:
-                failed_files.append({"name": file.filename, "reason": str(e)})
-                continue
-            except Exception as e:
-                failed_files.append({"name": file.filename, "reason": f"Parse error: {str(e)}"})
-                continue
-            
-            try:
-                rag_system.store_document(file.filename, text_content)
-                
-                doc_id = None
-                if hasattr(rag_system, 'neo4j') and hasattr(rag_system.neo4j, 'driver') and rag_system.neo4j.driver:
-                    with rag_system.neo4j.driver.session() as session:
-                        result = session.run(
-                            "MATCH (d:Document {title: $title}) RETURN d.id as id",
-                            title=file.filename
-                        )
-                        record = result.single()
-                        if record:
-                            doc_id = record["id"]
-                            file_storage[doc_id] = file_path
-                
-                results.append(file.filename)
-                print(f"Stored: {file.filename}")
-                
-                if postgres and postgres.conn:
-                    try:
-                        with postgres.conn.cursor() as cursor:
-                            cursor.execute(
-                                "INSERT INTO documents (title, content) VALUES (%s, %s)",
-                                (file.filename, text_content[:5000])
-                            )
-                            postgres.conn.commit()
-                    except Exception as e:
-                        print(f"PostgreSQL backup warning: {e}")
-                        
-            except Exception as e:
-                print(f"Storage error for {file.filename}: {e}")
-                failed_files.append({"name": file.filename, "reason": f"Storage failed: {str(e)}"})
-                
-        except Exception as e:
-            print(f"Unexpected error processing {file.filename}: {e}")
-            failed_files.append({"name": file.filename, "reason": f"Processing error: {str(e)}"})
+    # Separate successful and failed uploads
+    successful = [r["name"] for r in results if r["success"]]
+    failed = [{"name": r["name"], "reason": r["reason"]} for r in results if not r["success"]]
     
-    if not results and failed_files:
-        error_summary = "; ".join([f"{f['name']}: {f['reason']}" for f in failed_files[:3]])
+    if not successful and failed:
+        error_summary = "; ".join([f"{f['name']}: {f['reason']}" for f in failed[:3]])
         raise HTTPException(status_code=400, detail=f"All files failed. Errors: {error_summary}")
     
-    message = f"Successfully processed {len(results)}/{len(files)} file(s)"
-    if failed_files:
-        message += f". {len(failed_files)} file(s) failed"
+    message = f"Successfully processed {len(successful)}/{len(files)} file(s)"
+    if failed:
+        message += f". {len(failed)} file(s) failed"
     
     return {
         "message": message,
-        "processed_files": results,
-        "failed_files": failed_files,
-        "success_count": len(results),
-        "failure_count": len(failed_files)
+        "processed_files": successful,
+        "failed_files": failed,
+        "success_count": len(successful),
+        "failure_count": len(failed)
     }
 
 @app.post("/chat", response_model=ChatResponse)
@@ -295,7 +354,14 @@ async def chat_endpoint(request: ChatRequest):
     
     try:
         print(f"Chat request: {request.question}")
-        result = rag_system.chat(request.question)
+        
+        # Run chat in thread pool to avoid blocking
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(
+            executor,
+            rag_system.chat,
+            request.question
+        )
         
         print(f"Chat result keys: {result.keys()}")
         print(f"Sources in result: {result.get('sources', [])}")
@@ -315,8 +381,6 @@ async def chat_endpoint(request: ChatRequest):
         if result.get("sources"):
             sources = [SourceDocument(title=s["title"], doc_id=s["doc_id"]) for s in result["sources"]]
             print(f"Returning {len(sources)} sources to frontend")
-        else:
-            print("No sources found in result")
         
         response = ChatResponse(
             question=result["question"],
@@ -325,13 +389,10 @@ async def chat_endpoint(request: ChatRequest):
             sources=sources
         )
         
-        print(f"Final response has {len(response.sources) if response.sources else 0} sources")
-        
         return response
         
     except Exception as e:
         print(f"Chat error: {e}")
-        import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Chat failed: {str(e)}")
 
@@ -341,7 +402,7 @@ async def clear_documents():
         raise HTTPException(status_code=503, detail="GraphRAG system not available")
     
     try:
-        if hasattr(rag_system, 'neo4j') and hasattr(rag_system.neo4j, 'driver') and rag_system.neo4j.driver:
+        if hasattr(rag_system, 'neo4j') and rag_system.neo4j.driver:
             with rag_system.neo4j.driver.session() as session:
                 count_result = session.run("MATCH (d:Document) RETURN count(d) as count")
                 doc_count = count_result.single()["count"]
