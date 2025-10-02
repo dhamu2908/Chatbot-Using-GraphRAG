@@ -33,6 +33,80 @@ class GraphRAGSystem:
             print(f"Pulling embedding model...")
             os.system(f"ollama pull {self.embedding_model}")
     
+    def levenshtein_distance(self, s1: str, s2: str) -> int:
+        """Calculate Levenshtein distance between two strings"""
+        if len(s1) < len(s2):
+            return self.levenshtein_distance(s2, s1)
+        
+        if len(s2) == 0:
+            return len(s1)
+        
+        previous_row = range(len(s2) + 1)
+        for i, c1 in enumerate(s1):
+            current_row = [i + 1]
+            for j, c2 in enumerate(s2):
+                # Cost of insertions, deletions, or substitutions
+                insertions = previous_row[j + 1] + 1
+                deletions = current_row[j] + 1
+                substitutions = previous_row[j] + (c1 != c2)
+                current_row.append(min(insertions, deletions, substitutions))
+            previous_row = current_row
+        
+        return previous_row[-1]
+    
+    def fuzzy_match(self, query_term: str, keyword: str, threshold: float = 0.7) -> Tuple[bool, float]:
+        """
+        Check if query_term fuzzy matches keyword
+        Returns (is_match, similarity_score)
+        """
+        query_lower = query_term.lower()
+        keyword_lower = keyword.lower()
+        
+        # Exact match
+        if query_lower == keyword_lower:
+            return (True, 1.0)
+        
+        # Substring match
+        if query_lower in keyword_lower or keyword_lower in query_lower:
+            return (True, 0.9)
+        
+        # Calculate similarity based on edit distance
+        max_len = max(len(query_lower), len(keyword_lower))
+        if max_len == 0:
+            return (False, 0.0)
+        
+        distance = self.levenshtein_distance(query_lower, keyword_lower)
+        similarity = 1 - (distance / max_len)
+        
+        # Match if similarity is above threshold
+        is_match = similarity >= threshold
+        return (is_match, similarity)
+    
+    def find_fuzzy_matches(self, query_terms: List[str], all_keywords: List[str], 
+                          threshold: float = 0.7) -> Dict[str, List[Tuple[str, float]]]:
+        """
+        Find fuzzy matches for all query terms against all keywords
+        Returns dict mapping query_term -> [(matched_keyword, similarity_score), ...]
+        """
+        fuzzy_matches = {}
+        
+        for query_term in query_terms:
+            if len(query_term) < 3:  # Skip very short terms
+                continue
+            
+            matches = []
+            for keyword in all_keywords:
+                is_match, similarity = self.fuzzy_match(query_term, keyword, threshold)
+                if is_match:
+                    matches.append((keyword, similarity))
+            
+            # Sort by similarity score
+            matches.sort(key=lambda x: x[1], reverse=True)
+            if matches:
+                fuzzy_matches[query_term] = matches[:5]  # Keep top 5 matches per term
+        
+        return fuzzy_matches
+    
     def normalize_entity(self, entity: str) -> str:
         """Normalize entity names for better matching"""
         normalized = entity.lower().strip()
@@ -380,7 +454,7 @@ class GraphRAGSystem:
     
     def retrieve_with_reranking(self, question: str, query_analysis: Dict, 
                                 initial_k: int = 20, final_k: int = 8) -> Tuple[List[str], List[Dict]]:
-        """Enhanced retrieval with aggressive keyword matching"""
+        """Enhanced retrieval with fuzzy matching for misspelled queries"""
         if not hasattr(self.neo4j, 'driver') or not self.neo4j.driver:
             return (["Database not available."], [])
         
@@ -403,9 +477,36 @@ class GraphRAGSystem:
                 
                 print(f"\nSearching with {len(all_keywords)} total keywords: {all_keywords[:15]}")
                 
-                # STRATEGY 1: Aggressive keyword matching (highest priority)
+                # STEP 1: Get all available keywords from database
+                result = session.run("MATCH (k:Keyword) RETURN k.name as keyword")
+                db_keywords = [record['keyword'] for record in result]
+                print(f"\nDatabase contains {len(db_keywords)} unique keywords")
+                
+                # STEP 2: Find fuzzy matches for potentially misspelled query terms
+                fuzzy_threshold = 0.7  # 70% similarity required
+                fuzzy_matches = self.find_fuzzy_matches(all_keywords, db_keywords, fuzzy_threshold)
+                
+                # Build expanded keyword list with fuzzy matches
+                expanded_keywords = list(all_keywords)  # Start with original keywords
+                
+                if fuzzy_matches:
+                    print(f"\n{'='*60}")
+                    print("FUZZY MATCHES FOUND:")
+                    for query_term, matches in fuzzy_matches.items():
+                        print(f"  '{query_term}' matches:")
+                        for matched_kw, score in matches:
+                            print(f"    - '{matched_kw}' (similarity: {score:.2f})")
+                            if matched_kw not in expanded_keywords:
+                                expanded_keywords.append(matched_kw)
+                    print(f"{'='*60}\n")
+                else:
+                    print("\nNo fuzzy matches needed (exact matches found or no close matches)")
+                
+                print(f"Expanded keyword list: {len(expanded_keywords)} keywords")
+                
+                # STRATEGY 1: Aggressive keyword matching with fuzzy-matched keywords
                 keyword_candidates = []
-                if all_keywords:
+                if expanded_keywords:
                     result = session.run(
                         """
                         MATCH (d:Document)-[:CONTAINS]->(c:Chunk)-[:HAS_KEYWORD]->(k:Keyword)
@@ -416,15 +517,14 @@ class GraphRAGSystem:
                         ORDER BY keyword_count DESC
                         LIMIT 50
                         """,
-                        keywords=all_keywords[:30]
+                        keywords=expanded_keywords[:50]
                     )
                     keyword_candidates = list(result)
                     print(f"KEYWORD SEARCH: Found {len(keyword_candidates)} chunks")
                     for i, cand in enumerate(keyword_candidates[:3]):
                         print(f"  {i+1}. {cand['doc_title'][:50]} - matches: {cand['keyword_count']}")
                 
-                # STRATEGY 2: Text content search (secondary)
-                # Get all chunks and search in their content directly
+                # STRATEGY 2: Text content search with fuzzy matching
                 content_candidates = []
                 result = session.run(
                     """
@@ -435,16 +535,22 @@ class GraphRAGSystem:
                 )
                 all_chunks = list(result)
                 
-                # Filter by content matching
+                # Filter by content matching (including fuzzy matched terms)
                 for chunk in all_chunks:
                     content_lower = chunk['content'].lower()
                     content_normalized = self.normalize_entity(chunk['content'])
                     
-                    # Check if any entity appears in content
+                    # Check original entities
                     matches = 0
                     for entity in query_analysis['entities'][:15]:
                         if entity.lower() in content_lower or entity in content_normalized:
                             matches += 1
+                    
+                    # Check fuzzy matched keywords in content
+                    for query_term, matched_keywords in fuzzy_matches.items():
+                        for matched_kw, score in matched_keywords:
+                            if matched_kw.lower() in content_lower:
+                                matches += score  # Weight by similarity score
                     
                     if matches > 0:
                         content_candidates.append({
@@ -459,7 +565,7 @@ class GraphRAGSystem:
                 
                 print(f"CONTENT SEARCH: Found {len(content_candidates)} chunks with matching text")
                 for i, cand in enumerate(sorted(content_candidates, key=lambda x: x['content_matches'], reverse=True)[:3]):
-                    print(f"  {i+1}. {cand['doc_title'][:50]} - text matches: {cand['content_matches']}")
+                    print(f"  {i+1}. {cand['doc_title'][:50]} - text matches: {cand['content_matches']:.2f}")
                 
                 # STRATEGY 3: Combine all candidates
                 candidates_dict = {}
@@ -523,7 +629,7 @@ class GraphRAGSystem:
                     # Keyword match boost (graph-based)
                     keyword_boost = min(record.get('keyword_count', 0) * 0.15, 0.4)
                     
-                    # Content match boost (text-based)
+                    # Content match boost (text-based, including fuzzy matches)
                     content_boost = min(record.get('content_matches', 0) * 0.2, 0.5)
                     
                     # Combined score - prioritize content matches
@@ -548,7 +654,7 @@ class GraphRAGSystem:
                 print(f"TOP {len(top_results)} RESULTS:")
                 for i, chunk in enumerate(top_results, 1):
                     print(f"{i}. {chunk['doc_title'][:40]}")
-                    print(f"   Score: {chunk['score']:.3f} (sim: {chunk['similarity']:.3f}, kw: {chunk['keyword_count']}, txt: {chunk['content_matches']})")
+                    print(f"   Score: {chunk['score']:.3f} (sim: {chunk['similarity']:.3f}, kw: {chunk['keyword_count']}, txt: {chunk['content_matches']:.2f})")
                     print(f"   Preview: {chunk['content'][:100]}...")
                 print(f"{'='*60}")
                 
