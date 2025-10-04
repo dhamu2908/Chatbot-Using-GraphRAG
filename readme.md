@@ -1,85 +1,44 @@
-# Advanced GraphRAG Chatbot with Semantic Search
+# GraphRAG Chatbot
 
-A production-ready document Q&A system combining Graph databases (Neo4j), semantic embeddings, and Large Language Models for intelligent, context-aware responses with source attribution.
+A document question-answering system that uses Neo4j graph database, semantic embeddings, and Large Language Models to provide accurate answers with source attribution.
 
 ## Features
 
-- **Semantic Search with Embeddings**: 768-dimensional vector embeddings for meaning-based retrieval
-- **Multi-Stage Retrieval**: Query understanding → Embedding search → Re-ranking → Answer generation
-- **Source Attribution**: Clickable links to original documents, ranked by contribution
-- **Query Intent Detection**: Automatically detects question types (who/what/when/where/why/how)
-- **GPU Acceleration**: Optimized for NVIDIA GPUs (4GB+) with 5-10x speedup
-- **Hybrid Architecture**: Combines keyword matching with semantic similarity
-- **Answer Validation**: Verifies responses are relevant and grounded in context
-- **Document Structure Awareness**: Handles legal documents, articles, and plain text
-- **Auto-Cleanup**: Removes documents when session ends
+- Upload documents (TXT, PDF, DOCX, MD) and ask questions about their content
+- Semantic search using 768-dimensional embeddings
+- Source attribution - see which documents contributed to each answer
+- Fuzzy matching for handling typos and misspellings
+- Clean, modern web interface
+- Auto-cleanup of old data on server restart
 
----
-
-## System Architecture
+## Architecture
 
 ```
-Document Upload Flow:
-User Upload → Text Extraction → Sentence-Aware Chunking → Embedding Generation → Neo4j Storage
-
-Query Flow:
-User Query → Intent Analysis → Query Embedding → Semantic Search → Re-ranking → Answer Generation → Response
-     ↓              ↓                ↓                 ↓              ↓              ↓
-  (LLM)          (LLM)       (Embedding Model)    (Cosine Sim)   (Algorithm)      (LLM)
+Document Upload → Text Extraction → Chunking → Embedding Generation → Neo4j Storage
+Query → Entity Detection → Fuzzy Matching → Semantic Search → Re-ranking → Answer Generation
 ```
 
-### Technology Stack
-
-**Backend:**
-- FastAPI (Python web framework)
-- Neo4j 5.13 (Graph database)
-- PostgreSQL 13 (Relational database)
-- Ollama (LLM inference engine)
-
-**AI Models:**
-- **Main LLM**: phi3:mini (3.8B) or gemma:4b for query understanding & answer generation
-- **Embeddings**: nomic-embed-text (768-dim vectors) for semantic search
-
-**Frontend:**
-- Pure HTML/CSS/JavaScript
-
-### Graph Database Structure
-
-```cypher
-(Document {id, title, doc_type})
-  -[:CONTAINS]→
-(Chunk {id, content, embedding[768]})
-  -[:HAS_KEYWORD]→
-(Keyword {name})
-```
-
----
+**Technology Stack:**
+- Backend: FastAPI (Python)
+- Graph Database: Neo4j 5.13
+- Relational Database: PostgreSQL 13
+- AI Runtime: Ollama
+- Embedding Model: nomic-embed-text (768-dim)
+- LLM: phi3:mini or gemma:1b
+- Frontend: HTML/CSS/JavaScript
 
 ## Prerequisites
 
-### Required Software
-
 1. **Python 3.8+**
 2. **Docker & Docker Compose**
-3. **Ollama** - Download from https://ollama.com/download
-4. **NVIDIA GPU (Recommended)** - 4GB+ VRAM with CUDA 11.8+ drivers
-
-### System Requirements
-
-| Component | Minimum | Recommended |
-|-----------|---------|-------------|
-| RAM | 8GB | 16GB |
-| GPU VRAM | 4GB | 8GB+ |
-| Storage | 10GB | 20GB |
-| CPU | 4 cores | 8+ cores |
-
----
+3. **Ollama** - [Download here](https://ollama.com/download)
 
 ## Installation
 
-### Step 1: Install Dependencies
+### Step 1: Clone and Setup
 
 ```bash
+cd your-project-directory
 pip install -r requirements.txt
 ```
 
@@ -89,44 +48,44 @@ pip install -r requirements.txt
 # Embedding model (required)
 ollama pull nomic-embed-text
 
-# Choose LLM based on GPU:
-# For 4GB GPU (RTX 2050/3050)
-ollama pull phi3:mini
-
-# For 8GB+ GPU
-ollama pull gemma:4b
+# Choose one LLM:
+ollama pull phi3:mini    # For 4GB GPU
+ollama pull gemma:1b     # For 2GB GPU or CPU-only
 ```
 
-### Step 3: Start Databases
+### Step 3: Configure Environment
 
-```bash
-docker-compose up -d
-
-# Verify
-docker ps
-```
-
-### Step 4: Configure Environment
-
-Create `.env` file:
+Create a `.env` file in the project root:
 
 ```env
-# Neo4j
+# Neo4j Configuration
 NEO4J_URI=bolt://localhost:7687
 NEO4J_USERNAME=neo4j
 NEO4J_PASSWORD=password123
 
-# PostgreSQL
+# PostgreSQL Configuration
 POSTGRES_HOST=localhost
 POSTGRES_PORT=5432
 POSTGRES_DB=graphrag
 POSTGRES_USER=admin
 POSTGRES_PASSWORD=password123
 
-# Ollama
+# Ollama Configuration
 MODEL_NAME=phi3:mini
 OLLAMA_BASE_URL=http://localhost:11434
 ```
+
+### Step 4: Start Databases
+
+```bash
+# Start Neo4j and PostgreSQL
+docker-compose up -d
+
+# Verify containers are running
+docker ps
+```
+
+You should see `neo4j-graphrag` and `postgres-graphrag` containers.
 
 ### Step 5: Start Server
 
@@ -134,167 +93,96 @@ OLLAMA_BASE_URL=http://localhost:11434
 python start_server.py
 ```
 
+Wait for the message: "Started." This confirms Neo4j is ready.
+
 ### Step 6: Open Interface
 
-Open `chatbot_ui.html` in your browser.
+Open `chatbot_ui.html` in your web browser.
 
----
+## Project Structure
 
-## How It Works
-
-### 1. Document Processing
-
-Upload → Extract Text → Chunk into ~150 words → Generate 768-dim embeddings → Store in Neo4j
-
-### 2. Query Understanding
-
-When you ask "Who is Ambedkar?":
-- LLM extracts intent: "who" (person identification)
-- Identifies entities: ["Ambedkar"]
-- Generates variations: "B.R. Ambedkar", "Dr. Ambedkar", "Ambedkar was"
-
-### 3. Semantic Retrieval (Two-Stage)
-
-**Stage 1: Candidate Retrieval**
-- Generate embeddings for query variations
-- Search Neo4j for keyword matches
-- Get 15 initial candidates
-
-**Stage 2: Re-ranking**
-- Calculate cosine similarity with query embeddings
-- Apply relevance signals:
-  - +0.2: Direct answer patterns ("Ambedkar is...")
-  - +0.1: Entity matches
-  - -0.15: Indirect mentions ("someone said Ambedkar...")
-- Return top 5 chunks
-
-### 4. Answer Generation
-
-Top chunks + Question → LLM → Answer with sources
-
-### 5. Source Attribution
-
-Documents ranked by contribution (similarity score × content length)
-
----
-
-## Configuration
-
-### GPU Optimization
-
-**For 4GB GPU:**
-```env
-MODEL_NAME=phi3:mini
+```
+graphrag-chatbot/
+├── app/
+│   ├── main.py          # FastAPI server
+│   ├── rag.py           # RAG logic with embeddings
+│   ├── database.py      # Database connections
+│   └── models.py        # Data models
+├── uploaded_files/      # Stored documents
+├── .env                 # Configuration
+├── docker-compose.yml   # Database containers
+├── requirements.txt     # Python dependencies
+├── start_server.py      # Server launcher
+├── chatbot_ui.html      # Web interface
+└── README.md           # This file
 ```
 
-**For 8GB+ GPU:**
-```env
-MODEL_NAME=gemma:4b
-```
+## Usage
 
-### Performance Comparison
+### Upload Documents
 
-| Model | VRAM | Speed | Quality |
-|-------|------|-------|---------|
-| phi3:mini | 2.5GB | 40-60 tok/s | Excellent |
-| gemma:4b | 3.5GB | 30-50 tok/s | Superior |
+1. Click "Choose Files" in the web interface
+2. Select one or more documents (TXT, PDF, DOCX, MD)
+3. Click "Upload Documents"
+4. Wait for processing to complete
 
----
+### Ask Questions
 
-## Usage Guide
+1. Type your question in the input box
+2. Press Enter or click the send button
+3. View the answer and source documents
 
-### Basic Workflow
+### Clear Data
 
-1. **Upload Documents** - Select .txt, .pdf, .docx, or .md files
-2. **Ask Questions** - Type in input box and press Enter
-3. **Access Sources** - Click document links below answers
-
-### Supported Question Types
-
-- Identity: "Who is [person]?"
-- Definition: "What is [concept]?"
-- Factual: "When was [event]?"
-- Process: "How to [action]?"
-
----
+Click "Clear All Documents" to remove all uploaded documents and start fresh.
 
 ## API Endpoints
 
-### Base URL
-```
-http://localhost:8000
-```
-
-### Key Endpoints
-
-**Health Check**
+### Check Status
 ```http
-GET /
+GET http://localhost:8000/status
 ```
 
-**System Status**
-```http
-GET /status
-```
+Returns connection status for Neo4j, PostgreSQL, and Ollama.
 
-**Upload Documents**
+### Upload Documents
 ```http
-POST /upload-files
+POST http://localhost:8000/upload-files
 Content-Type: multipart/form-data
 ```
 
-**Chat**
+### Ask Question
 ```http
-POST /chat
+POST http://localhost:8000/chat
 Content-Type: application/json
 
 {
-  "question": "Who is Ambedkar?"
+  "question": "What is artificial intelligence?"
 }
 ```
 
-**List Documents**
+### List Documents
 ```http
-GET /documents
+GET http://localhost:8000/documents
 ```
 
-**Get Document**
+### Clear All Documents
 ```http
-GET /document/{doc_id}
+DELETE http://localhost:8000/documents
 ```
 
-**Clear Documents**
+### Debug Graph Status
 ```http
-DELETE /documents
+GET http://localhost:8000/debug/graph-status
 ```
 
----
-
-## Performance & Scaling
-
-### Response Times
-
-| Operation | CPU | GPU (4GB) |
-|-----------|-----|-----------|
-| Upload (per doc) | 10-15s | 2-3s |
-| Query processing | 20-30s | 3-5s |
-
-### Scalability
-
-| Documents | Chunks | Upload Time | Query Time |
-|-----------|--------|-------------|------------|
-| 10 | ~100 | 30s | 3s |
-| 100 | ~1,000 | 5min | 4s |
-| 1,000 | ~10,000 | 45min | 6s |
-| 10,000 | ~100,000 | 7hrs | 10s |
-
----
+Shows node counts and document list in Neo4j.
 
 ## Troubleshooting
 
 ### Server Won't Start
 
-**Port in use:**
+**Port already in use:**
 ```bash
 # Windows
 netstat -ano | findstr :8000
@@ -304,126 +192,209 @@ taskkill /PID <PID> /F
 lsof -ti:8000 | xargs kill -9
 ```
 
-### GPU Not Being Used
+### Neo4j Authentication Error
 
-**Check GPU:**
 ```bash
-nvidia-smi
+# Reset database completely
+docker-compose down -v
+docker-compose up -d
+
+# Wait 20 seconds for Neo4j to initialize
+python start_server.py
 ```
 
-**Fix:** Reinstall Ollama from https://ollama.com/download
+### Out of Memory Error
 
-### Wrong Answers
+If you see "MemoryPoolOutOfMemoryError" when clearing documents:
 
-1. Verify correct document uploaded
-2. Check terminal logs
-3. Try rephrasing question
-4. Clear and re-upload:
-   ```bash
-   docker-compose down -v
-   docker-compose up -d
-   ```
-
-### Slow Performance
-
-1. Use GPU if available
-2. Switch to smaller model: `MODEL_NAME=phi3:mini`
-3. Close other applications
-
-### Out of Memory
-
-1. Use smaller model: `ollama pull phi3:mini`
-2. Reduce retrieval: Set `final_k=3` in `rag.py`
-
----
-
-## Project Structure
-
-```
-graphrag-chatbot/
-├── app/
-│   ├── main.py              # FastAPI server
-│   ├── rag.py               # RAG logic with embeddings
-│   ├── database.py          # Database connections
-│   └── models.py            # Data models
-├── uploaded_files/          # Stored documents
-├── .env                     # Configuration
-├── docker-compose.yml       # Database containers
-├── requirements.txt         # Dependencies
-├── start_server.py          # Server launcher
-├── chatbot_ui.html          # Web interface
-└── README.md               # This file
+```bash
+# Nuclear option - complete reset
+docker-compose down -v
+docker-compose up -d
 ```
 
----
+This removes all data but takes only 30 seconds.
 
-## Advanced Features
+### Database Not Clearing
 
-### Custom Prompting
+The updated code deletes in batches of 10,000 nodes to avoid memory issues. For large databases, this may take several minutes. Check the terminal for progress messages.
 
-Edit prompts in `rag.py`:
+### Ollama Not Found
+
+```bash
+# Check if Ollama is running
+ollama list
+
+# If not installed, download from https://ollama.com/download
+```
+
+### Import Errors
+
+Make sure you're running the server from the project root directory:
+
+```bash
+cd /path/to/project
+python start_server.py
+```
+
+Not from inside the `app/` directory.
+
+## Configuration
+
+### Change LLM Model
+
+Edit `.env`:
+```env
+MODEL_NAME=gemma:1b    # or phi3:mini, gemma:4b, etc.
+```
+
+Then restart the server.
+
+### Adjust Retrieval Parameters
+
+In `app/rag.py`, modify the `retrieve_with_reranking` function:
+- `initial_k`: Number of candidate chunks (default: 20)
+- `final_k`: Number of chunks to use for answer (default: 8)
+- `batch_size`: Fuzzy match threshold (default: 0.7 = 70% similarity)
+
+## Performance
+
+### Response Times (GPU)
+- Document upload: 2-5 seconds per document
+- Query processing: 3-5 seconds
+
+### Response Times (CPU Only)
+- Document upload: 10-15 seconds per document
+- Query processing: 15-30 seconds
+
+### Scalability
+- 10 documents: ~1 minute upload, 3s queries
+- 100 documents: ~10 minutes upload, 4s queries
+- 1,000 documents: ~2 hours upload, 6s queries
+
+## Key Features Explained
+
+### Fuzzy Matching
+
+The system handles typos and misspellings using Levenshtein distance:
+- "Shubman Gill" matches "Shubman Gil" (70%+ similarity)
+- "Ambedkar" matches "Ambedker", "Amdedkar"
+
+### Entity Detection
+
+Automatically extracts names, places, and concepts:
+- Capitalized phrases: "Shubman Gill"
+- Single names: "Chahal", "Ambedkar"
+- Lowercase names: "yuzi chahal" → "Yuzi Chahal"
+
+### Semantic Search
+
+Uses 768-dimensional embeddings to find relevant chunks based on meaning, not just keywords.
+
+### Re-ranking Algorithm
+
+Combines multiple signals:
+- Semantic similarity (cosine distance)
+- Keyword matches from graph
+- Direct text content matches
+- Fuzzy match scores
+
+## Database Schema
+
+### Neo4j Graph Structure
+
+```cypher
+(Document {id, title})
+  -[:CONTAINS]→
+(Chunk {id, content, embedding[768]})
+  -[:HAS_KEYWORD]→
+(Keyword {name})
+```
+
+### PostgreSQL Tables
+
+```sql
+documents (id, title, content, created_at)
+chat_history (id, question, answer, created_at)
+```
+
+## Maintenance
+
+### Clear Old Data on Startup
+
+The server automatically clears the database when it starts to ensure a clean state.
+
+To disable this, comment out the cleanup call in `start_server.py`:
 ```python
-prompt = f"""Your custom instructions...
-Context: {context_text}
-Question: {question}
-Answer:"""
+# clear_database_on_startup()  # Commented out
 ```
 
-### Adding Document Types
+### View Database Contents
 
-In `main.py`, add parsers for new formats:
+**Neo4j Browser:** http://localhost:7474
+- Username: neo4j
+- Password: password123
+
+**PostgreSQL:**
+```bash
+docker exec -it postgres-graphrag psql -U admin -d graphrag
+```
+
+### Backup Data
+
+```bash
+# Backup Neo4j
+docker exec neo4j-graphrag neo4j-admin database dump neo4j --to-path=/backups
+
+# Backup PostgreSQL
+docker exec postgres-graphrag pg_dump -U admin graphrag > backup.sql
+```
+
+## Advanced Configuration
+
+### Increase Neo4j Memory
+
+Edit `docker-compose.yml`:
+```yaml
+neo4j:
+  environment:
+    - NEO4J_dbms_memory_heap_max__size=2G
+    - NEO4J_dbms_memory_pagecache_size=1G
+```
+
+Then restart:
+```bash
+docker-compose down
+docker-compose up -d
+```
+
+### Change Chunk Size
+
+In `app/rag.py`, modify `chunk_text()`:
 ```python
-if file_ext == '.csv':
-    import pandas as pd
-    return pd.read_csv(BytesIO(content)).to_string()
+def chunk_text(self, text: str, max_chunk_size: int = 150):
+    # Change 150 to your desired size
 ```
 
----
+Smaller chunks = more precise but less context.
+Larger chunks = more context but less precise.
 
-## Architecture Details
+## Support
 
-### GraphRAG Implementation
-
-1. **Graph Storage**: Documents as interconnected nodes in Neo4j
-2. **Semantic Search**: 768-dim vector embeddings for meaning-based retrieval
-3. **Re-ranking**: Multi-signal relevance scoring
-4. **Source Tracking**: Contribution-based document ranking
-
-### Tech Stack
-
-- **Backend**: FastAPI (Python)
-- **Graph DB**: Neo4j
-- **Relational DB**: PostgreSQL
-- **AI Runtime**: Ollama
-- **Frontend**: HTML/CSS/JavaScript
-- **Containers**: Docker Compose
-
----
+For issues:
+1. Check the troubleshooting section above
+2. Review terminal logs for error messages
+3. Check database status: http://localhost:8000/debug/graph-status
+4. Verify services: `docker ps` and `ollama list`
 
 ## License
 
 MIT License - free to use and modify.
 
-## Contributing
+## Credits
 
-1. Fork repository
-2. Create feature branch
-3. Make changes
-4. Test thoroughly
-5. Submit pull request
-
-## Support
-
-**For issues:**
-1. Check troubleshooting section
-2. Review terminal logs
-3. Verify system status: http://localhost:8000/status
-4. Ensure all services running: `docker ps` and `nvidia-smi`
-
-**Resources:**
-- Ollama: https://ollama.com/docs
-- Neo4j: https://neo4j.com/docs
-- FastAPI: https://fastapi.tiangolo.com
-
----
-
+Built with:
+- [FastAPI](https://fastapi.tiangolo.com/)
+- [Neo4j](https://neo4j.com/)
+- [Ollama](https://ollama.com/)
+- [PostgreSQL](https://www.postgresql.org/)
