@@ -1,0 +1,34 @@
+version: '3.8'
+
+services:
+  neo4j:
+    image: neo4j:5.13
+    container_name: neo4j-graphrag
+    environment:
+      - NEO4J_AUTH=neo4j/password123
+      - NEO4J_PLUGINS=["apoc"]
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+    volumes:
+      - neo4j_data:/data
+      - neo4j_logs:/logs
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:13
+    container_name: postgres-graphrag
+    environment:
+      - POSTGRES_DB=graphrag
+      - POSTGRES_USER=admin
+      - POSTGRES_PASSWORD=password123
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+volumes:
+  neo4j_data:
+  neo4j_logs:
+  postgres_data:

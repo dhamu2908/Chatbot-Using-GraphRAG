@@ -1,0 +1,983 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GraphRAG Chatbot</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .chat-container {
+            width: 800px;
+            height: 600px;
+            background: rgba(255, 255, 255, 0.95);
+            backdrop-filter: blur(10px);
+            border-radius: 20px;
+            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.1);
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        .chat-header {
+            background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%);
+            padding: 20px;
+            color: white;
+            text-align: center;
+            position: relative;
+        }
+
+        .chat-header h1 {
+            font-size: 24px;
+            font-weight: 600;
+            margin-bottom: 5px;
+        }
+
+        .status-indicator {
+            position: absolute;
+            right: 20px;
+            top: 50%;
+            transform: translateY(-50%);
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 12px;
+        }
+
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #4ade80;
+            animation: pulse 2s infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+
+        .chat-messages {
+            flex: 1;
+            padding: 20px;
+            overflow-y: auto;
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+        }
+
+        .message {
+            max-width: 70%;
+            padding: 12px 16px;
+            border-radius: 18px;
+            word-wrap: break-word;
+            animation: messageSlide 0.3s ease-out;
+        }
+
+        @keyframes messageSlide {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        .user-message {
+            align-self: flex-end;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+        }
+
+        .bot-message {
+            align-self: flex-start;
+            background: #f3f4f6;
+            color: #1f2937;
+            border: 1px solid #e5e7eb;
+        }
+
+        .message-time {
+            font-size: 10px;
+            opacity: 0.7;
+            margin-top: 4px;
+        }
+
+        .sources-section {
+            margin-top: 12px;
+            padding-top: 12px;
+            border-top: 1px solid #e5e7eb;
+        }
+
+        .sources-title {
+            font-size: 11px;
+            color: #6b7280;
+            font-weight: 600;
+            margin-bottom: 8px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            display: flex;
+            align-items: center;
+            gap: 4px;
+        }
+
+        .source-links {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+        }
+
+        .source-link {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 6px 12px;
+            background: #eff6ff;
+            border: 1px solid #bfdbfe;
+            border-radius: 14px;
+            font-size: 12px;
+            color: #1e40af;
+            text-decoration: none;
+            transition: all 0.2s ease;
+            cursor: pointer;
+            font-weight: 500;
+        }
+
+        .source-link:hover {
+            background: #dbeafe;
+            border-color: #60a5fa;
+            transform: translateY(-2px);
+            box-shadow: 0 4px 8px rgba(59, 130, 246, 0.3);
+        }
+
+        .source-link svg {
+            width: 14px;
+            height: 14px;
+            flex-shrink: 0;
+        }
+
+        .chat-input {
+            padding: 20px;
+            border-top: 1px solid #e5e7eb;
+            background: white;
+        }
+
+        .input-container {
+            display: flex;
+            gap: 10px;
+            align-items: flex-end;
+        }
+
+        .input-wrapper {
+            flex: 1;
+            position: relative;
+        }
+
+        #messageInput {
+            width: 100%;
+            border: 2px solid #e5e7eb;
+            border-radius: 25px;
+            padding: 12px 20px;
+            font-size: 14px;
+            resize: none;
+            outline: none;
+            transition: all 0.3s ease;
+            max-height: 100px;
+            min-height: 45px;
+        }
+
+        #messageInput:focus {
+            border-color: #4facfe;
+            box-shadow: 0 0 0 3px rgba(79, 172, 254, 0.1);
+        }
+
+        #sendButton {
+            width: 45px;
+            height: 45px;
+            border: none;
+            border-radius: 50%;
+            background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%);
+            color: white;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: all 0.3s ease;
+            box-shadow: 0 4px 15px rgba(79, 172, 254, 0.3);
+        }
+
+        #sendButton:hover:not(:disabled) {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(79, 172, 254, 0.4);
+        }
+
+        #sendButton:disabled {
+            background: #9ca3af;
+            cursor: not-allowed;
+            transform: none;
+            box-shadow: none;
+        }
+
+        .welcome-message {
+            text-align: center;
+            color: #6b7280;
+            padding: 20px;
+        }
+
+        .welcome-message h2 {
+            margin-bottom: 10px;
+            color: #374151;
+        }
+
+        .upload-section {
+            margin: 20px 0;
+            padding: 15px;
+            background: #f8f9fa;
+            border-radius: 10px;
+            border: 1px solid #e5e7eb;
+        }
+
+        .system-status-section {
+            margin: 20px 0;
+            padding: 15px;
+            background: #f0f9ff;
+            border-radius: 10px;
+            border: 1px solid #bfdbfe;
+        }
+
+        .system-status-section h3 {
+            margin-bottom: 15px;
+            color: #1e40af;
+            font-size: 16px;
+        }
+
+        .status-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 10px;
+            margin-bottom: 15px;
+        }
+
+        .status-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 8px 12px;
+            background: white;
+            border-radius: 6px;
+            border: 1px solid #e5e7eb;
+        }
+
+        .status-label {
+            font-weight: 500;
+            color: #374151;
+            font-size: 13px;
+        }
+
+        .status-value {
+            font-size: 12px;
+            font-weight: 600;
+            padding: 2px 8px;
+            border-radius: 12px;
+        }
+
+        .status-connected {
+            background: #d1fae5;
+            color: #065f46;
+        }
+
+        .status-disconnected {
+            background: #fef2f2;
+            color: #dc2626;
+        }
+
+        .status-checking {
+            background: #fef3c7;
+            color: #92400e;
+        }
+
+        .status-message {
+            text-align: center;
+            font-size: 12px;
+            color: #6b7280;
+            padding: 8px;
+            background: white;
+            border-radius: 6px;
+            border: 1px solid #e5e7eb;
+        }
+
+        .status-message.success {
+            background: #d1fae5;
+            color: #065f46;
+            border-color: #10b981;
+        }
+
+        .status-message.error {
+            background: #fef2f2;
+            color: #dc2626;
+            border-color: #ef4444;
+        }
+
+        .status-message.warning {
+            background: #fef3c7;
+            color: #92400e;
+            border-color: #f59e0b;
+        }
+
+        .upload-section h3 {
+            margin-bottom: 10px;
+            color: #374151;
+            font-size: 16px;
+        }
+
+        .file-input {
+            width: 100%;
+            padding: 8px;
+            margin-bottom: 10px;
+            border: 1px solid #d1d5db;
+            border-radius: 8px;
+        }
+
+        .action-button {
+            background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%);
+            color: white;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 20px;
+            cursor: pointer;
+            font-size: 12px;
+            margin: 5px;
+            transition: all 0.3s ease;
+        }
+
+        .action-button:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 4px 12px rgba(79, 172, 254, 0.3);
+        }
+
+        .action-button:disabled {
+            background: #9ca3af;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        .upload-button { background: #10b981; }
+        .clear-button { background: #6b7280; }
+
+        .upload-status {
+            margin-top: 10px;
+            padding: 8px;
+            border-radius: 4px;
+            font-size: 12px;
+        }
+
+        .upload-status.success {
+            background: #d1fae5;
+            color: #065f46;
+            border: 1px solid #10b981;
+        }
+
+        .upload-status.error {
+            background: #fef2f2;
+            color: #dc2626;
+            border: 1px solid #ef4444;
+        }
+
+        .documents-container {
+            max-height: 100px;
+            overflow-y: auto;
+            border: 1px solid #e5e7eb;
+            border-radius: 6px;
+            padding: 10px;
+            background: white;
+            margin: 10px 0;
+        }
+
+        .document-item {
+            padding: 4px 0;
+            font-size: 12px;
+            color: #374151;
+        }
+
+        .typing-indicator {
+            align-self: flex-start;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 12px 16px;
+            background: #f3f4f6;
+            border-radius: 18px;
+            border: 1px solid #e5e7eb;
+        }
+
+        .typing-dots {
+            display: flex;
+            gap: 4px;
+        }
+
+        .typing-dot {
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+            background: #9ca3af;
+            animation: typing 1.4s infinite ease-in-out;
+        }
+
+        .typing-dot:nth-child(1) { animation-delay: -0.32s; }
+        .typing-dot:nth-child(2) { animation-delay: -0.16s; }
+
+        @keyframes typing {
+            0%, 80%, 100% { transform: scale(0); opacity: 0.5; }
+            40% { transform: scale(1); opacity: 1; }
+        }
+
+        @media (max-width: 768px) {
+            .chat-container {
+                width: 95vw;
+                height: 90vh;
+            }
+            
+            .message {
+                max-width: 85%;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="chat-container">
+        <div class="chat-header">
+            <h1>GraphRAG Chatbot</h1>
+            <p>Ask me anything about your documents</p>
+            <div class="status-indicator">
+                <div class="status-dot"></div>
+                <span>Online</span>
+            </div>
+        </div>
+
+        <div class="chat-messages" id="chatMessages">
+            <div class="welcome-message">
+                <h2>Welcome!</h2>
+                <p>I'm your GraphRAG assistant. Upload documents and ask questions about them.</p>
+                
+                <div class="system-status-section">
+                    <h3>System Status</h3>
+                    <div class="status-grid">
+                        <div class="status-item">
+                            <span class="status-label">API Server:</span>
+                            <span class="status-value" id="serverStatus">Checking...</span>
+                        </div>
+                        <div class="status-item">
+                            <span class="status-label">Neo4j:</span>
+                            <span class="status-value" id="neo4jStatus">Checking...</span>
+                        </div>
+                        <div class="status-item">
+                            <span class="status-label">PostgreSQL:</span>
+                            <span class="status-value" id="postgresStatus">Checking...</span>
+                        </div>
+                        <div class="status-item">
+                            <span class="status-label">Ollama:</span>
+                            <span class="status-value" id="ollamaStatus">Checking...</span>
+                        </div>
+                        <div class="status-item">
+                            <span class="status-label">AI Model:</span>
+                            <span class="status-value" id="modelStatus">Checking...</span>
+                        </div>
+                    </div>
+                    <div class="status-message" id="systemMessage">Checking system connections...</div>
+                </div>
+                
+                <div class="upload-section">
+                    <h3>Upload Documents</h3>
+                    <input type="file" id="fileInput" multiple accept=".txt,.pdf,.doc,.docx,.md" class="file-input">
+                    <button class="action-button upload-button" id="uploadBtn">Upload Documents</button>
+                    <div id="uploadStatus" class="upload-status"></div>
+                    
+                    <div class="documents-container" id="documentsContainer">
+                        <p style="text-align: center; color: #9ca3af;">No documents uploaded yet</p>
+                    </div>
+                </div>
+                
+                <div>
+                    <button class="action-button" id="addSampleBtn">Add Sample Data</button>
+                    <button class="action-button clear-button" id="clearDocsBtn">Clear All Documents</button>
+                    <button class="action-button clear-button" id="clearChatBtn">Clear Chat</button>
+                </div>
+            </div>
+        </div>
+
+        <div class="chat-input">
+            <div class="input-container">
+                <div class="input-wrapper">
+                    <textarea 
+                        id="messageInput" 
+                        placeholder="Type your question here..."
+                        rows="1"
+                    ></textarea>
+                </div>
+                <button id="sendButton">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <line x1="22" y1="2" x2="11" y2="13"></line>
+                        <polygon points="22,2 15,22 11,13 2,9"></polygon>
+                    </svg>
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        class GraphRAGChatbot {
+            constructor() {
+                this.apiBaseUrl = 'http://localhost:8000';
+                this.messageInput = document.getElementById('messageInput');
+                this.sendButton = document.getElementById('sendButton');
+                this.chatMessages = document.getElementById('chatMessages');
+                this.fileInput = document.getElementById('fileInput');
+                this.uploadBtn = document.getElementById('uploadBtn');
+                this.uploadStatus = document.getElementById('uploadStatus');
+                this.documentsContainer = document.getElementById('documentsContainer');
+                this.isTyping = false;
+                this.serverConnected = false;
+                
+                this.initializeEventListeners();
+                this.checkServerStatus();
+                this.loadDocumentList();
+                
+                // Auto-cleanup on page unload
+                window.addEventListener('beforeunload', () => {
+                    this.autoCleanup();
+                });
+            }
+
+            initializeEventListeners() {
+                this.messageInput.addEventListener('keydown', (e) => {
+                    if (e.key === 'Enter' && !e.shiftKey) {
+                        e.preventDefault();
+                        this.sendMessage();
+                    }
+                });
+
+                this.messageInput.addEventListener('input', () => {
+                    this.autoResizeTextarea();
+                    this.toggleSendButton();
+                });
+
+                this.sendButton.addEventListener('click', () => this.sendMessage());
+                this.uploadBtn.addEventListener('click', () => this.uploadFiles());
+                this.fileInput.addEventListener('change', () => this.toggleUploadButton());
+                document.getElementById('addSampleBtn').addEventListener('click', () => this.addSampleData());
+                document.getElementById('clearDocsBtn').addEventListener('click', () => this.clearAllDocuments());
+                document.getElementById('clearChatBtn').addEventListener('click', () => {
+                    this.clearChat();
+                    this.autoCleanup();
+                });
+
+                this.toggleSendButton();
+                this.toggleUploadButton();
+            }
+
+            autoResizeTextarea() {
+                this.messageInput.style.height = 'auto';
+                this.messageInput.style.height = Math.min(this.messageInput.scrollHeight, 100) + 'px';
+            }
+
+            toggleSendButton() {
+                const hasText = this.messageInput.value.trim().length > 0;
+                this.sendButton.disabled = !hasText || this.isTyping;
+            }
+
+            toggleUploadButton() {
+                const hasFiles = this.fileInput.files && this.fileInput.files.length > 0;
+                this.uploadBtn.disabled = !hasFiles || !this.serverConnected;
+            }
+
+            async autoCleanup() {
+                try {
+                    await fetch(`${this.apiBaseUrl}/documents`, { method: 'DELETE' });
+                    console.log('Auto-cleanup: Documents cleared');
+                } catch (error) {
+                    console.log('Auto-cleanup failed:', error);
+                }
+            }
+
+            async checkServerStatus() {
+                this.updateSystemStatus({
+                    server: 'checking',
+                    neo4j: 'checking', 
+                    postgresql: 'checking',
+                    ollama: 'checking',
+                    model: 'checking'
+                });
+                
+                try {
+                    const response = await fetch(`${this.apiBaseUrl}/status`, {
+                        method: 'GET',
+                        headers: { 'Content-Type': 'application/json' }
+                    });
+                    
+                    if (response.ok) {
+                        const statusData = await response.json();
+                        this.serverConnected = true;
+                        
+                        this.updateSystemStatus({
+                            server: 'connected',
+                            neo4j: statusData.neo4j || 'disconnected',
+                            postgresql: statusData.postgresql || 'disconnected', 
+                            ollama: statusData.ollama || 'disconnected',
+                            model: statusData.model || 'unknown'
+                        });
+                        
+                        const statusSpan = document.querySelector('.status-indicator span');
+                        const statusDot = document.querySelector('.status-dot');
+                        
+                        if (statusSpan) statusSpan.textContent = 'Connected';
+                        if (statusDot) statusDot.style.background = '#4ade80';
+                        
+                        this.updateSystemMessage(statusData);
+                        
+                    } else {
+                        throw new Error(`HTTP ${response.status}`);
+                    }
+                } catch (error) {
+                    this.serverConnected = false;
+                    
+                    this.updateSystemStatus({
+                        server: 'disconnected',
+                        neo4j: 'unknown',
+                        postgresql: 'unknown', 
+                        ollama: 'unknown',
+                        model: 'unknown'
+                    });
+                    
+                    const statusSpan = document.querySelector('.status-indicator span');
+                    const statusDot = document.querySelector('.status-dot');
+                    
+                    if (statusSpan) statusSpan.textContent = 'Disconnected';
+                    if (statusDot) statusDot.style.background = '#ef4444';
+                    
+                    const systemMessage = document.getElementById('systemMessage');
+                    if (systemMessage) {
+                        systemMessage.textContent = 'Server not running. Please start the GraphRAG server on port 8000.';
+                        systemMessage.className = 'status-message error';
+                    }
+                }
+                
+                this.toggleSendButton();
+                this.toggleUploadButton();
+            }
+
+            updateSystemStatus(statusData) {
+                const statusElements = {
+                    'serverStatus': { value: statusData.server, label: statusData.server },
+                    'neo4jStatus': { value: statusData.neo4j, label: statusData.neo4j },
+                    'postgresStatus': { value: statusData.postgresql, label: statusData.postgresql },
+                    'ollamaStatus': { value: statusData.ollama, label: statusData.ollama },
+                    'modelStatus': { value: statusData.model, label: statusData.model }
+                };
+                
+                Object.entries(statusElements).forEach(([elementId, data]) => {
+                    const element = document.getElementById(elementId);
+                    if (element) {
+                        element.textContent = data.label;
+                        element.className = 'status-value';
+                        
+                        if (data.value === 'connected') {
+                            element.classList.add('status-connected');
+                        } else if (data.value === 'disconnected') {
+                            element.classList.add('status-disconnected');
+                        } else {
+                            element.classList.add('status-checking');
+                        }
+                    }
+                });
+            }
+
+            updateSystemMessage(statusData) {
+                const systemMessage = document.getElementById('systemMessage');
+                if (!systemMessage) return;
+                
+                const connectedComponents = [];
+                const disconnectedComponents = [];
+                
+                if (statusData.neo4j === 'connected') connectedComponents.push('Neo4j');
+                else disconnectedComponents.push('Neo4j');
+                
+                if (statusData.postgresql === 'connected') connectedComponents.push('PostgreSQL');
+                else disconnectedComponents.push('PostgreSQL');
+                
+                if (statusData.ollama === 'connected') connectedComponents.push('Ollama');
+                else disconnectedComponents.push('Ollama');
+                
+                let message = '';
+                let messageClass = 'status-message';
+                
+                if (disconnectedComponents.length === 0) {
+                    message = 'All systems connected and ready!';
+                    messageClass += ' success';
+                } else if (disconnectedComponents.length === 3) {
+                    message = 'All external services disconnected. Basic chat available with limited functionality.';
+                    messageClass += ' error';
+                } else {
+                    message = `Connected: ${connectedComponents.join(', ')}. Disconnected: ${disconnectedComponents.join(', ')}`;
+                    messageClass += ' warning';
+                }
+                
+                systemMessage.textContent = message;
+                systemMessage.className = messageClass;
+            }
+
+            async sendMessage() {
+                const message = this.messageInput.value.trim();
+                
+                if (!message || this.isTyping) return;
+
+                this.addMessage(message, 'user');
+                
+                this.messageInput.value = '';
+                this.autoResizeTextarea();
+                this.toggleSendButton();
+                this.showTypingIndicator();
+                
+                try {
+                    const response = await fetch(`${this.apiBaseUrl}/chat`, {
+                        method: 'POST',
+                        headers: { 
+                            'Content-Type': 'application/json',
+                            'Accept': 'application/json'
+                        },
+                        body: JSON.stringify({ question: message })
+                    });
+
+                    if (response.ok) {
+                        const data = await response.json();
+                        this.hideTypingIndicator();
+                        this.addMessage(data.answer, 'bot', data.sources);
+                    } else {
+                        throw new Error(`Server error: ${response.status}`);
+                    }
+                } catch (error) {
+                    this.hideTypingIndicator();
+                    this.addMessage(`Error: ${error.message}. Please check if the server is running on port 8000.`, 'bot');
+                }
+            }
+
+            async uploadFiles() {
+                if (!this.fileInput.files || this.fileInput.files.length === 0) return;
+
+                const formData = new FormData();
+                for (let file of this.fileInput.files) {
+                    formData.append('files', file);
+                }
+
+                this.uploadBtn.disabled = true;
+                this.uploadBtn.textContent = 'Uploading...';
+                this.showUploadStatus('Processing files...', 'processing');
+
+                try {
+                    const response = await fetch(`${this.apiBaseUrl}/upload-files`, {
+                        method: 'POST',
+                        body: formData
+                    });
+
+                    if (response.ok) {
+                        const result = await response.json();
+                        this.showUploadStatus(result.message, 'success');
+                        this.fileInput.value = '';
+                        this.loadDocumentList();
+                        this.addMessage(`${result.message}`, 'bot');
+                    } else {
+                        const error = await response.json();
+                        throw new Error(error.detail || 'Upload failed');
+                    }
+                } catch (error) {
+                    this.showUploadStatus(`Upload failed: ${error.message}`, 'error');
+                } finally {
+                    this.uploadBtn.disabled = false;
+                    this.uploadBtn.textContent = 'Upload Documents';
+                    this.toggleUploadButton();
+                }
+            }
+
+            async loadDocumentList() {
+                if (!this.serverConnected) return;
+
+                try {
+                    const response = await fetch(`${this.apiBaseUrl}/documents`);
+                    if (response.ok) {
+                        const result = await response.json();
+                        this.displayDocuments(result.documents || []);
+                    }
+                } catch (error) {
+                    console.error('Failed to load documents:', error);
+                }
+            }
+
+            displayDocuments(documents) {
+                if (documents.length === 0) {
+                    this.documentsContainer.innerHTML = '<p style="text-align: center; color: #9ca3af;">No documents uploaded yet</p>';
+                    return;
+                }
+
+                let html = documents.map(doc => 
+                    `<div class="document-item">${doc.title}</div>`
+                ).join('');
+
+                this.documentsContainer.innerHTML = html;
+            }
+
+            async addSampleData() {
+                try {
+                    const response = await fetch(`${this.apiBaseUrl}/add-sample-data`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' }
+                    });
+                    
+                    if (response.ok) {
+                        const result = await response.json();
+                        this.addMessage(`${result.message}`, 'bot');
+                        this.loadDocumentList();
+                    }
+                } catch (error) {
+                    this.addMessage('Failed to add sample data', 'bot');
+                }
+            }
+
+            async clearAllDocuments() {
+                if (!confirm('Clear all documents? This cannot be undone.')) return;
+
+                try {
+                    const response = await fetch(`${this.apiBaseUrl}/documents`, { method: 'DELETE' });
+                    if (response.ok) {
+                        const result = await response.json();
+                        this.addMessage(`${result.message}`, 'bot');
+                        this.loadDocumentList();
+                    }
+                } catch (error) {
+                    this.addMessage('Failed to clear documents', 'bot');
+                }
+            }
+
+            clearChat() {
+                const messages = this.chatMessages.querySelectorAll('.message');
+                messages.forEach(msg => msg.remove());
+            }
+
+            addMessage(text, type, sources = null) {
+                const messageDiv = document.createElement('div');
+                messageDiv.className = `message ${type}-message`;
+                
+                const contentDiv = document.createElement('div');
+                if (type === 'bot') {
+                    contentDiv.innerHTML = text.replace(/\n/g, '<br>');
+                } else {
+                    contentDiv.textContent = text;
+                }
+                messageDiv.appendChild(contentDiv);
+                
+                const timeDiv = document.createElement('div');
+                timeDiv.className = 'message-time';
+                timeDiv.textContent = new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
+                messageDiv.appendChild(timeDiv);
+
+                if (type === 'bot' && sources && sources.length > 0) {
+                    const sourcesSection = document.createElement('div');
+                    sourcesSection.className = 'sources-section';
+                    
+                    const sourcesTitle = document.createElement('div');
+                    sourcesTitle.className = 'sources-title';
+                    sourcesTitle.innerHTML = `
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/>
+                            <polyline points="13 2 13 9 20 9"/>
+                        </svg>
+                        Referenced Documents
+                    `;
+                    sourcesSection.appendChild(sourcesTitle);
+                    
+                    const sourceLinks = document.createElement('div');
+                    sourceLinks.className = 'source-links';
+                    
+                    sources.forEach(source => {
+                        const link = document.createElement('a');
+                        link.className = 'source-link';
+                        link.href = `${this.apiBaseUrl}/document/${source.doc_id}`;
+                        link.target = '_blank';
+                        link.rel = 'noopener noreferrer';
+                        link.innerHTML = `
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+                                <polyline points="14 2 14 8 20 8"/>
+                                <line x1="16" y1="13" x2="8" y2="13"/>
+                                <line x1="16" y1="17" x2="8" y2="17"/>
+                                <polyline points="10 9 9 9 8 9"/>
+                            </svg>
+                            ${source.title}
+                        `;
+                        sourceLinks.appendChild(link);
+                    });
+                    
+                    sourcesSection.appendChild(sourceLinks);
+                    messageDiv.appendChild(sourcesSection);
+                }
+
+                this.chatMessages.appendChild(messageDiv);
+                this.scrollToBottom();
+            }
+
+            showTypingIndicator() {
+                this.isTyping = true;
+                this.toggleSendButton();
+                
+                const typingDiv = document.createElement('div');
+                typingDiv.className = 'typing-indicator';
+                typingDiv.id = 'typingIndicator';
+                typingDiv.innerHTML = `
+                    <span>AI is thinking</span>
+                    <div class="typing-dots">
+                        <div class="typing-dot"></div>
+                        <div class="typing-dot"></div>
+                        <div class="typing-dot"></div>
+                    </div>
+                `;
+                
+                this.chatMessages.appendChild(typingDiv);
+                this.scrollToBottom();
+            }
+
+            hideTypingIndicator() {
+                this.isTyping = false;
+                this.toggleSendButton();
+                const indicator = document.getElementById('typingIndicator');
+                if (indicator) indicator.remove();
+            }
+
+            showUploadStatus(message, type) {
+                this.uploadStatus.textContent = message;
+                this.uploadStatus.className = `upload-status ${type}`;
+                
+                if (type !== 'processing') {
+                    setTimeout(() => {
+                        this.uploadStatus.textContent = '';
+                        this.uploadStatus.className = 'upload-status';
+                    }, 3000);
+                }
+            }
+
+            scrollToBottom() {
+                this.chatMessages.scrollTop = this.chatMessages.scrollHeight;
+            }
+        }
+
+        document.addEventListener('DOMContentLoaded', () => {
+            new GraphRAGChatbot();
+        });
+    </script>
+</body>
+</html>
